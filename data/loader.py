@@ -9,9 +9,12 @@ logging.getLogger("fastf1").setLevel(logging.WARNING)
 fastf1.Cache.enable_cache("cache/")
 
 
+
+
 def load_session(year: int, grand_prix: str, session_type: str = "R"):
     session = fastf1.get_session(year, grand_prix, session_type)
     session.load(telemetry=True, laps=True, weather=True, messages=True)
+
     return session
 
 
@@ -97,3 +100,34 @@ def get_lap_timestamps(session: Session) -> list:
         print(f"get_lap_timestamps error: {e}")
         return []
 
+
+def get_year_schedule(year: int):
+    schedule = fastf1.get_event_schedule(year)
+    races = schedule[schedule["EventFormat"] != "Testing"]
+    return races["EventName"].tolist()
+
+
+def get_event_sessions(year: int, event_name: str) -> list:
+    event = fastf1.get_event(year, event_name)
+    sessions = []
+
+    session_map = {
+        "Practice 1": "FP1",
+        "Practice 2": "FP2",
+        "Practice 3": "FP3",
+        "Qualifying": "Q",
+        "Sprint": "S",
+        "Sprint Shootout": "SS",
+        "Sprint Qualifying": "SQ",
+        "Race": "R"
+    }
+
+    for i in range(1, 6):
+        session_name = event.get(f"Session{i}")
+        if pd.notna(session_name) and session_name in session_map:
+            sessions.append({
+                "label": session_name,
+                "identifier": session_map[session_name]
+            })
+    return sessions
+    

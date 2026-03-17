@@ -15,6 +15,21 @@ circuit_info = None
 all_positions: dict = {}
 lap_timestamps: list = []
 
+
+
+
+# Thread safety
+# Optimization
+last_positions: dict = {}  # driver -> (px, py)
+position_buffer: list = []
+buffer_lock = threading.Lock()
+render_mutex = threading.Lock()
+
+# Session Selection Default Values
+selected_year: int = 2023
+selected_event: str = ""
+selected_session: str = ""
+
 # Animation state
 current_time: float = 0.0
 max_time: float = 0.0
@@ -25,6 +40,3 @@ is_playing: bool = False
 
 # Driver markers
 driver_tags: dict = {}
-
-# Thread safety
-render_mutex = threading.Lock()

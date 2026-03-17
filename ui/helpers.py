@@ -1,11 +1,18 @@
 import numpy as np
-import ui.globals as globals
+import ui.state as state
 import dearpygui.dearpygui as dpg
-
 
 
 def get_pos_at_time(all_positions: dict, current_time: float) -> list:
     positions = []
+
+    def catmull_rom(p0, p1, p2, p3, t):
+        return (
+            0.5 * (2 * p1
+            + (-p0 + p2) * t
+            + (2*p0 - 5*p1 + 4*p2 - p3) * t**2
+            + (-p0 + 3*p1 - 3*p2 + p3) * t**3)
+        )
 
     for driver_num, driver_data in all_positions.items():
         frames = driver_data["frames"]
@@ -15,13 +22,52 @@ def get_pos_at_time(all_positions: dict, current_time: float) -> list:
             continue
 
         idx = int(np.searchsorted(times, current_time))
-        idx = min(idx, len(frames) - 1)
+
+        if idx <= 0:
+            positions.append({
+                "driver": driver_data["abbreviation"],
+                "team": driver_data["team"],
+                "x": frames[0]["x"],
+                "y": frames[0]["y"],
+            })
+            continue
+
+        if idx >= len(frames):
+            positions.append({
+                "driver": driver_data["abbreviation"],
+                "team": driver_data["team"],
+                "x": frames[-1]["x"],
+                "y": frames[-1]["y"],
+            })
+            continue
+
+        # Get 4 surrounding frames
+        i0 = max(idx - 2, 0)
+        i1 = max(idx - 1, 0)
+        i2 = min(idx, len(frames) - 1)
+        i3 = min(idx + 1, len(frames) - 1)
+
+        p0 = (frames[i0]["x"], frames[i0]["y"])
+        p1 = (frames[i1]["x"], frames[i1]["y"])
+        p2 = (frames[i2]["x"], frames[i2]["y"])
+        p3 = (frames[i3]["x"], frames[i3]["y"])
+
+        # How far between p1 and p2
+        time_range = frames[i2]["time"] - frames[i1]["time"]
+        if time_range == 0:
+            t = 0.0
+        else:
+            t = (current_time - frames[i1]["time"]) / time_range
+        t = max(0.0, min(1.0, t))
+
+        x = catmull_rom(p0[0], p1[0], p2[0], p3[0], t)
+        y = catmull_rom(p0[1], p1[1], p2[1], p3[1], t)
 
         positions.append({
             "driver": driver_data["abbreviation"],
             "team": driver_data["team"],
-            "x": frames[idx]["x"],
-            "y": frames[idx]["y"],
+            "x": x,
+            "y": y,
         })
 
     return positions
