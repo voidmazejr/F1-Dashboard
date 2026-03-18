@@ -9,12 +9,14 @@ from data.loader import (
     get_race_start_time,
     get_lap_timestamps,
     get_event_sessions,
-    get_year_schedule
+    get_year_schedule,
+    get_race_state_at_time
 )
 
 from ui.drawing import (draw_track, 
                         create_driver_markers, 
-                        update_driver_positions
+                        update_driver_positions,
+                        update_position_table
 )
 
 from ui.callbacks import (animation_loop, 
@@ -70,6 +72,8 @@ def on_load_session(sender, app_data):
         create_driver_markers()
         update_driver_positions(state.current_time)
         build_lap_buttons()
+        state.race_state = get_race_state_at_time(state.session, state.current_time, state.race_start_time)
+        update_position_table()
 
     except Exception as e:
         dpg.set_value("status_text", f"Error: {str(e)}")
@@ -78,9 +82,9 @@ def on_load_session(sender, app_data):
 def run():
 
     dpg.create_context()
-    dpg.create_viewport(title="F1 Dashboard", width=state.CANVAS_WIDTH + 200, height=state.CANVAS_HEIGHT + 180)
+    dpg.create_viewport(title="F1 Dashboard", width=state.CANVAS_WIDTH + 380, height=state.CANVAS_HEIGHT + 180)
 
-    with dpg.window(label="F1 Dashboard", width=state.CANVAS_WIDTH + 200, height=state.CANVAS_HEIGHT + 180, no_resize=True, tag="main_window"):
+    with dpg.window(label="F1 Dashboard", width=state.CANVAS_WIDTH + 380, height=state.CANVAS_HEIGHT + 180, no_resize=True, tag="main_window"):
 
 
         # Session Controls
@@ -148,12 +152,22 @@ def run():
                 width=300
             )
 
-        # Drawing canvas
-        with dpg.drawlist(width=state.CANVAS_WIDTH, height=state.CANVAS_HEIGHT):
-            with dpg.draw_layer(tag="track_layer"):
-                pass
-            with dpg.draw_layer(tag="driver_layer"):
-                pass
+        # Position panel + track map side by side
+        with dpg.group(horizontal=True):
+
+            # Left panel — position table
+            with dpg.child_window(width=180, height=state.CANVAS_HEIGHT, border=True, tag="position_panel"):
+                dpg.add_text("  P  Driver  T  Gap", color=(180, 180, 180, 255))
+                dpg.add_separator()
+                with dpg.group(tag="position_table"):
+                    pass
+
+            # Right — track map
+            with dpg.drawlist(width=state.CANVAS_WIDTH, height=state.CANVAS_HEIGHT):
+                with dpg.draw_layer(tag="track_layer"):
+                    pass
+                with dpg.draw_layer(tag="driver_layer"):
+                    pass
 
     # Pre-populate race dropdown with default year
     try:

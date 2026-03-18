@@ -1,8 +1,8 @@
 import dearpygui.dearpygui as dpg
 import numpy as np
 import ui.state as state
-from utils.colors import get_team_color
-from ui.helpers import get_pos_at_time, normalize_coordinates
+from utils.colors import get_team_color, get_compound_color
+from ui.helpers import get_pos_at_time, normalize_coordinates, calculate_realtime_gaps
 
 
 
@@ -26,7 +26,9 @@ def draw_track():
     ty = normalize_coordinates(state.track_y, 0, state.CANVAS_HEIGHT)
     ty = state.CANVAS_HEIGHT - ty
 
+
     points = list(zip(tx.tolist(), ty.tolist()))
+    points.append(points[0]) # close the track loop 
 
     for i in range(len(points) - 1):
         dpg.draw_line(points[i], points[i + 1], color=(80, 80, 80, 255), thickness=8, parent="track_layer")
@@ -103,3 +105,64 @@ def update_driver_positions(current_time: float):
     positions = get_pos_at_time(state.all_positions, current_time)
     apply_positions(positions)
 
+
+def update_position_table():
+    dpg.delete_item("position_table", children_only=True)
+
+    if not state.all_positions or state.session is None:
+        return
+
+    gaps = calculate_realtime_gaps(state.all_positions, state.current_time, state.race_state, state.lap_timestamps)
+
+    if not gaps:
+        return
+
+    # Check if we're in pre-race mode (race_state order) or live mode (distance order)
+    leader_dist = 0.0
+    for driver_data in state.all_positions.values():
+        times = driver_data["times"]
+        dists = driver_data["distances"]
+        if len(times) > 0 and len(dists) > 0:
+            d = float(np.interp(state.current_time, times, dists))
+            if d > leader_dist:
+                leader_dist = d
+
+    if leader_dist < 1000:
+        # Pre-race — use race_state order
+        entries = [(e["driver"], e["position"], gaps.get(e["driver"], "—")) 
+                   for e in state.race_state if e["position"] != 99]
+        entries.sort(key=lambda x: x[1])
+    else:
+        # Live mode — use distance order from gaps
+        def sort_key(item):
+            abbr, gap = item
+            if gap == "Leader": return 0.0
+            if gap in ("—", "N/A"): return 999.0
+            if "L" in gap:
+                try: return 500.0 + float(gap.replace("+", "").replace("L", ""))
+                except: return 500.0
+            try: return float(gap.replace("+", "").replace("s", ""))
+            except: return 999.0
+
+        sorted_gaps = sorted(gaps.items(), key=sort_key)
+        entries = [(abbr, pos + 1, gap) for pos, (abbr, gap) in enumerate(sorted_gaps)]
+
+    for pos, (abbr, _, gap) in enumerate(entries, start=1):
+        driver_data = next((d for d in state.all_positions.values() if d["abbreviation"] == abbr), None)
+        if not driver_data:
+            continue
+
+        team_hex = get_team_color(driver_data["team"], state.session)
+        team_hex = team_hex.lstrip("#")
+        r, g, b = tuple(int(team_hex[i:i+2], 16) for i in (0, 2, 4))
+
+        race_entry = next((e for e in state.race_state if e["driver"] == abbr), None)
+        compound = race_entry["compound"] if race_entry else "?"
+        compound_letter = compound[0] if compound != "?" else "?"
+        compound_color = get_compound_color(compound)
+
+        with dpg.group(horizontal=True, parent="position_table"):
+            dpg.add_text(f"{pos:>2}", color=(255, 255, 255, 255))
+            dpg.add_text(f" {abbr}", color=(r, g, b, 255))
+            dpg.add_text(f" {compound_letter}", color=compound_color)
+            dpg.add_text(f" {gap}", color=(180, 180, 180, 255))

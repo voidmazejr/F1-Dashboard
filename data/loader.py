@@ -4,10 +4,9 @@ import pandas as pd
 from fastf1.core import Session
 import logging
 
-logging.getLogger("fastf1").setLevel(logging.WARNING)
+logging.getLogger("fastf1").setLevel(logging.ERROR)
 
 fastf1.Cache.enable_cache("cache/")
-
 
 
 
@@ -34,17 +33,17 @@ def get_all_driver_positions(session: Session) -> dict:
         try:
             driver_laps = session.laps.pick_drivers(driver)
             driver_info = session.get_driver(driver)
-
             frames = []
-            for _, lap in driver_laps.iterlaps():
-                pos_data = lap.get_pos_data()
+            cumulative_distance = 0.0
 
-                if pos_data is None or pos_data.empty:
+            for _, lap in driver_laps.iterlaps():
+                telemetry = lap.get_telemetry()
+
+                if telemetry is None or telemetry.empty:
                     continue
 
-                for _, row in pos_data.iterrows():
+                for _, row in telemetry.iterrows():
                     x, y = row["X"], row["Y"]
-
                     if x == 0 and y == 0:
                         continue
 
@@ -52,16 +51,25 @@ def get_all_driver_positions(session: Session) -> dict:
                         "time": row["SessionTime"].total_seconds(),
                         "x": x,
                         "y": y,
+                        "distance": cumulative_distance + row["Distance"],
                     })
+
+                lap_dist = telemetry["Distance"].max()
+                if pd.notna(lap_dist):
+                    cumulative_distance += lap_dist
+
+            frames.sort(key=lambda f: f["time"])
 
             all_positions[driver] = {
                 "abbreviation": driver_info["Abbreviation"],
                 "team": driver_info["TeamName"],
-                "frames": sorted(frames, key=lambda f: f["time"]),
-                "times": np.array(sorted([f["time"] for f in frames]))
+                "frames": frames,
+                "times": np.array([f["time"] for f in frames]),
+                "distances": np.array([f["distance"] for f in frames]),
             }
 
-        except Exception:
+        except Exception as e:
+            print(f"Driver {driver} error: {e}")
             continue
 
     return all_positions
@@ -131,3 +139,56 @@ def get_event_sessions(year: int, event_name: str) -> list:
             })
     return sessions
     
+
+def get_race_state_at_time(session: Session, current_time: float, race_start_time: float) -> list:
+    try:
+        results = []
+
+        for driver in session.drivers:
+            try:
+                driver_laps = session.laps.pick_drivers(driver)
+                driver_info = session.get_driver(driver)
+
+                # Find the most recent completed lap at current_time
+                completed_laps = driver_laps[
+                    driver_laps["LapStartTime"].dt.total_seconds() <= current_time
+                ].dropna(subset=["LapStartTime"])
+
+
+                if completed_laps.empty:        
+                    continue
+
+                latest_lap = completed_laps.iloc[-1]
+
+                position = latest_lap["Position"]
+                compound = latest_lap["Compound"]
+                lap_number = int(latest_lap["LapNumber"])
+
+                results.append({
+                    "driver": driver_info["Abbreviation"],
+                    "team": driver_info["TeamName"],
+                    "position": int(position) if pd.notna(position) else 99,
+                    "compound": compound if pd.notna(compound) else "?",
+                    "lap_number": lap_number,
+                    "lap_start_time": latest_lap["LapStartTime"].total_seconds(),
+                })
+
+            except Exception:
+                continue
+
+        # Sort by position  
+        results.sort(key=lambda x: x["position"])
+
+    
+        # Sort by position
+        results.sort(key=lambda x: x["position"])
+
+        # Set placeholder gap — real gaps calculated in calculate_realtime_gaps
+        for r in results:
+            r["gap"] = "..."
+
+        return results
+
+    except Exception as e:
+        print(f"get_race_state_at_time error: {e}")
+        return []

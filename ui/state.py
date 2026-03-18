@@ -16,7 +16,8 @@ all_positions: dict = {}
 lap_timestamps: list = []
 
 
-
+race_state: list = []
+last_table_update: float = 0.0
 
 # Thread safety
 # Optimization

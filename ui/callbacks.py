@@ -1,8 +1,8 @@
 import dearpygui.dearpygui as dpg
 import ui.state as state
 from ui.helpers import format_race_time, get_pos_at_time
-from ui.drawing import update_driver_positions, apply_positions
-from data.loader import get_year_schedule, get_event_sessions, get_all_driver_positions
+from ui.drawing import update_driver_positions, apply_positions, update_position_table
+from data.loader import get_year_schedule, get_event_sessions, get_all_driver_positions, get_race_state_at_time
 import time
 
 
@@ -16,6 +16,9 @@ def on_time_change(sender, app_data):
     state.current_time = float(app_data) + state.race_start_time
     dpg.set_value("time_display", format_race_time(float(app_data)))
     update_driver_positions(state.current_time)
+    if state.session:
+        state.race_state = get_race_state_at_time(state.session, state.current_time, state.race_start_time)
+        update_position_table()
 
 
 def jump_to_time(absolute_time: float):
@@ -24,6 +27,9 @@ def jump_to_time(absolute_time: float):
     dpg.set_value("time_slider", relative)
     dpg.set_value("time_display", format_race_time(relative))
     update_driver_positions(state.current_time)
+    if state.session:
+        state.race_state = get_race_state_at_time(state.session, state.current_time, state.race_start_time)
+        update_position_table()
 
 
 def on_toggle_laps(sender, app_data):
@@ -108,8 +114,8 @@ def animation_loop():
 
     delta = now - state.last_frame_time
     state.last_frame_time = now
-    state.current_time += delta * state.animation_speed
 
+    state.current_time += delta * state.animation_speed
     dpg.set_value("time_slider", state.current_time - state.race_start_time)
     dpg.set_value("time_display", format_race_time(state.current_time - state.race_start_time))
 
@@ -118,6 +124,17 @@ def animation_loop():
 
     if positions:
         apply_positions(positions)
+
+    # Update position table every 2 real seconds
+    if now - state.last_table_update >= 2.0:
+        state.last_table_update = now
+        if state.session is not None:
+            state.race_state = get_race_state_at_time(
+                state.session,
+                state.current_time,
+                state.race_start_time
+            )
+            update_position_table()
 
     # Debug FPS — remove later
     # if delta > 0 and int(state.current_time) % 2 == 0:
