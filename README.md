@@ -13,7 +13,7 @@ Built with [FastF1](https://github.com/theOehrly/Fast-F1) and [Dear PyGui](https
 ## Setup
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/f1-dashboard.git
+git clone https://github.com/voidmazejr/f1-dashboard.git
 cd f1-dashboard
 
 # Create a virtual environment

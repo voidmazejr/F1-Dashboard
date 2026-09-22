@@ -1,10 +1,9 @@
 import dearpygui.dearpygui as dpg
 import ui.state as state
-from ui.helpers import format_race_time, get_pos_at_time
-from ui.drawing import update_driver_positions, apply_positions, update_position_table
-from data.loader import get_year_schedule, get_event_sessions, get_all_driver_positions, get_race_state_at_time
+from ui.helpers import format_race_time
+from ui.drawing import apply_positions, update_position_table
+from data.loader import get_year_schedule, get_event_sessions
 import time
-
 
 
 def on_play_pause(sender, app_data):
@@ -12,24 +11,81 @@ def on_play_pause(sender, app_data):
     dpg.set_value("play_button", "Pause" if state.is_playing else "Play")
 
 
-def on_time_change(sender, app_data):
-    state.current_time = float(app_data) + state.race_start_time
-    dpg.set_value("time_display", format_race_time(float(app_data)))
-    update_driver_positions(state.current_time)
-    if state.session:
-        state.race_state = get_race_state_at_time(state.session, state.current_time, state.race_start_time)
-        update_position_table()
+def on_frame_change(sender, app_data):
+    state.frame_index = int(app_data)
+    _render_frame(state.frame_index)
+
+
+def jump_to_frame(frame_index: int):
+    state.frame_index = max(0, min(frame_index, state.total_frames - 1))
+    dpg.set_value("time_slider", state.frame_index)
+    _render_frame(state.frame_index)
 
 
 def jump_to_time(absolute_time: float):
-    state.current_time = absolute_time
-    relative = absolute_time - state.race_start_time
-    dpg.set_value("time_slider", relative)
-    dpg.set_value("time_display", format_race_time(relative))
-    update_driver_positions(state.current_time)
-    if state.session:
-        state.race_state = get_race_state_at_time(state.session, state.current_time, state.race_start_time)
+    if not state.frames:
+        return
+    # Find closest frame to this absolute time
+    target = absolute_time - state.t_min
+    frame_idx = int(target * state.fps)
+    jump_to_frame(frame_idx)
+
+
+def _render_frame(frame_index: int):
+    if not state.frames or frame_index >= len(state.frames):
+        return
+
+    frame = state.frames[frame_index]
+    t_relative = frame["t"] - state.t_min
+    dpg.set_value("time_display", format_race_time(t_relative))
+
+    positions = [
+        {
+            "driver": car["driver"],
+            "team": car["team"],
+            "x": car["x"],
+            "y": car["y"],
+        }
+        for car in frame["drivers"]
+    ]
+    apply_positions(positions)
+
+    # Update table every 30 frames
+    if frame_index % 30 == 0:
         update_position_table()
+
+
+def animation_loop():
+    if not state.frames:
+        return
+
+    if not state.is_playing:
+        state.last_frame_time = 0.0
+        return
+    if state.frame_index >= state.total_frames - 1:
+        state.is_playing = False
+        dpg.set_value("play_button", "Play")
+        return
+
+    now = time.time()
+    if state.last_frame_time == 0.0:
+        state.last_frame_time = now
+
+    delta = now - state.last_frame_time
+    state.last_frame_time = now
+
+    state.frame_accumulator += delta * state.fps * state.animation_speed
+
+
+    if state.frame_accumulator >= 1.0:
+        frames_to_advance = int(state.frame_accumulator)
+        state.frame_accumulator -= frames_to_advance
+        state.frame_index = min(
+            state.frame_index + frames_to_advance,
+            state.total_frames - 1
+        )
+        dpg.set_value("time_slider", state.frame_index)
+        _render_frame(state.frame_index)
 
 
 def on_toggle_laps(sender, app_data):
@@ -42,101 +98,57 @@ def on_toggle_laps(sender, app_data):
 def build_lap_buttons():
     dpg.delete_item("lap_buttons_inner", children_only=True)
 
+    if not state.frames:
+        return
+
+    # Find the first frame for each lap number
+    lap_frames = {}
+    for i, frame in enumerate(state.frames):
+        for car in frame["drivers"]:
+            lap = car["lap"]
+            if lap not in lap_frames:
+                lap_frames[lap] = i
+            break
+
     with dpg.group(horizontal=True, parent="lap_buttons_inner"):
-        for entry in state.lap_timestamps:
-            lap_num = entry["lap"]
-            lap_time = entry["time"]
-
-            if lap_time is None:
-                continue
-
+        for lap_num in sorted(lap_frames.keys()):
+            frame_idx = lap_frames[lap_num]
             dpg.add_button(
                 label=f" {lap_num} ",
-                callback=lambda s, a, u: jump_to_time(u),
-                user_data=float(lap_time),
+                callback=lambda s, a, u: jump_to_frame(u),
+                user_data=frame_idx,
                 width=38
             )
 
 
 def on_year_change(sender, app_data):
     state.selected_year = int(app_data)
-
-    try: 
+    try:
         races = get_year_schedule(state.selected_year)
         dpg.configure_item("race_dropdown", items=races)
         dpg.set_value("race_dropdown", "")
         dpg.set_value("session_dropdown", "")
         dpg.configure_item("session_dropdown", items=[])
-    
-    except Exception as e: 
-        print(f"on_year_change() error: {e}")
+    except Exception as e:
+        print(f"on_year_change error: {e}")
 
 
-def on_race_change(sender, app_data): 
+def on_race_change(sender, app_data):
     state.selected_event = app_data
-
     try:
         sessions = get_event_sessions(state.selected_year, state.selected_event)
         session_labels = [s["label"] for s in sessions]
         dpg.configure_item("session_dropdown", items=session_labels)
         dpg.set_value("session_dropdown", "")
     except Exception as e:
-        print(f"on_race_change() error: {e}")
+        print(f"on_race_change error: {e}")
 
 
-def on_session_change(sender, app_data): 
+def on_session_change(sender, app_data):
     state.selected_session = app_data
 
 
 def pos_worker():
-    while True:
-        if state.is_playing:
-            positions = get_pos_at_time(state.all_positions, state.current_time)
-            with state.buffer_lock:
-                state.position_buffer = positions
-        time.sleep(0.016)
-
-
-def animation_loop():
-    if state.max_time == 0.0 or state.current_time == 0.0:
-        return
-    if not state.is_playing:
-        state.last_frame_time = 0.0
-        return
-    if state.current_time >= state.max_time:
-        state.is_playing = False
-        dpg.set_value("play_button", "Play")
-        return
-
-    now = time.time()
-    if state.last_frame_time == 0.0:
-        state.last_frame_time = now
-
-    delta = now - state.last_frame_time
-    state.last_frame_time = now
-
-    state.current_time += delta * state.animation_speed
-    dpg.set_value("time_slider", state.current_time - state.race_start_time)
-    dpg.set_value("time_display", format_race_time(state.current_time - state.race_start_time))
-
-    with state.buffer_lock:
-        positions = list(state.position_buffer)
-
-    if positions:
-        apply_positions(positions)
-
-    # Update position table every 2 real seconds
-    if now - state.last_table_update >= 2.0:
-        state.last_table_update = now
-        if state.session is not None:
-            state.race_state = get_race_state_at_time(
-                state.session,
-                state.current_time,
-                state.race_start_time
-            )
-            update_position_table()
-
-    # Debug FPS — remove later
-    # if delta > 0 and int(state.current_time) % 2 == 0:
-    #     print(f"FPS: {1/delta:.0f}")
-        
+    # No longer needed with precomputed frames
+    # Kept to avoid import errors until fully cleaned up
+    pass

@@ -1,33 +1,27 @@
 import dearpygui.dearpygui as dpg
 import ui.state as state
 import threading
-
 from data.loader import (
     load_session,
     get_track_outline,
-    get_all_driver_positions,
     get_race_start_time,
     get_lap_timestamps,
     get_event_sessions,
     get_year_schedule,
+    precompute_frames,
     get_race_state_at_time
 )
-
-from ui.drawing import (draw_track, 
-                        create_driver_markers, 
-                        update_driver_positions,
-                        update_position_table
-)
-
-from ui.callbacks import (animation_loop, 
-                          on_play_pause, 
-                          on_time_change, 
-                          on_toggle_laps, 
-                          build_lap_buttons,
-                          on_year_change,
-                          on_race_change,
-                          on_session_change,
-                          pos_worker
+from ui.drawing import draw_track, draw_pit_lane, create_driver_markers, update_position_table
+from ui.callbacks import (
+    animation_loop,
+    on_play_pause,
+    on_frame_change,
+    on_toggle_laps,
+    build_lap_buttons,
+    on_year_change,
+    on_race_change,
+    on_session_change,
+    pos_worker
 )
 
 
@@ -35,7 +29,7 @@ def on_load_session(sender, app_data):
     if not state.selected_event or not state.selected_session:
         dpg.set_value("status_text", "Please select a year, race and session first")
         return
-    
+
     sessions = get_event_sessions(state.selected_year, state.selected_event)
     session_id = next((s["identifier"] for s in sessions if s["label"] == state.selected_session), None)
 
@@ -52,42 +46,63 @@ def on_load_session(sender, app_data):
             dpg.set_value("status_text", "Error: Could not load session")
             return
 
+        dpg.set_value("status_text", "Precomputing frames... (this may take a moment)")
+        result = precompute_frames(state.session)
+
+        state.frames = result["frames"]
+        state.total_frames = len(state.frames)
+        state.t_min = result["t_min"]
+        state.t_max = result["t_max"]
+        state.fps = result["fps"]
+        state.frame_index = 0
+        state.frame_accumulator = 0.0
+        state.stable_positions = {}
+        state.position_hold_frames = {}
+
+        # Find race start frame
+        race_start_time = get_race_start_time(state.session)
+        state.race_start_time = race_start_time
+        state.frame_index = max(0, int((race_start_time - state.t_min) * state.fps))
+
         state.track_x, state.track_y, state.circuit_info = get_track_outline(state.session)
-        state.all_positions = get_all_driver_positions(state.session)
-        state.race_start_time = get_race_start_time(state.session)
-        state.current_time = state.race_start_time
+
+        # Cache canvas bounds
+        state.canvas_x_min = float(state.track_x.min())
+        state.canvas_x_max = float(state.track_x.max())
+        state.canvas_y_min = float(state.track_y.min())
+        state.canvas_y_max = float(state.track_y.max())
+
         state.lap_timestamps = get_lap_timestamps(state.session)
 
-        state.max_time = max(
-            f["time"]
-            for driver_data in state.all_positions.values()
-            for f in driver_data["frames"]
+        # Pre-populate race_state for the first 20 seconds
+        state.race_state = get_race_state_at_time(
+            state.session, race_start_time, race_start_time
         )
 
-        dpg.configure_item("time_slider", min_value=0.0)
-        dpg.configure_item("time_slider", max_value=float(state.max_time - state.race_start_time))
+        dpg.configure_item("time_slider", min_value=0, max_value=state.total_frames - 1)
+        dpg.set_value("time_slider", state.frame_index)
         dpg.set_value("status_text", f"Loaded: {state.selected_event} {state.selected_year}")
 
         draw_track()
+        draw_pit_lane()
         create_driver_markers()
-        update_driver_positions(state.current_time)
-        build_lap_buttons()
-        state.race_state = get_race_state_at_time(state.session, state.current_time, state.race_start_time)
         update_position_table()
+        build_lap_buttons()
 
     except Exception as e:
         dpg.set_value("status_text", f"Error: {str(e)}")
+        print(f"Load error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def run():
-
     dpg.create_context()
     dpg.create_viewport(title="F1 Dashboard", width=state.CANVAS_WIDTH + 380, height=state.CANVAS_HEIGHT + 180)
 
     with dpg.window(label="F1 Dashboard", width=state.CANVAS_WIDTH + 380, height=state.CANVAS_HEIGHT + 180, no_resize=True, tag="main_window"):
 
-
-        # Session Controls
+        # Session controls
         with dpg.group(horizontal=True):
             dpg.add_combo(
                 label="Year",
@@ -114,16 +129,16 @@ def run():
             dpg.add_button(label="Load Session", callback=on_load_session)
 
         dpg.add_text("No session loaded", tag="status_text", color=(180, 180, 180))
-            
+
         # Playback controls
         with dpg.group(horizontal=True):
             dpg.add_button(label="Play", tag="play_button", callback=on_play_pause)
-            dpg.add_slider_float(
+            dpg.add_slider_int(
                 label="",
                 tag="time_slider",
-                min_value=0.0,
-                max_value=1.0,
-                callback=on_time_change,
+                min_value=0,
+                max_value=1,
+                callback=on_frame_change,
                 width=600
             )
             dpg.add_text("0:00", tag="time_display")
@@ -152,24 +167,24 @@ def run():
                 width=300
             )
 
-        # Position panel + track map side by side
+        # Position panel + track map
         with dpg.group(horizontal=True):
 
-            # Left panel — position table
+            # Left panel
             with dpg.child_window(width=180, height=state.CANVAS_HEIGHT, border=True, tag="position_panel"):
-                dpg.add_text("  P  Driver  T  Gap", color=(180, 180, 180, 255))
+                dpg.add_text("  P  Driver  T", color=(180, 180, 180, 255))
                 dpg.add_separator()
                 with dpg.group(tag="position_table"):
                     pass
 
-            # Right — track map
+            # Track map
             with dpg.drawlist(width=state.CANVAS_WIDTH, height=state.CANVAS_HEIGHT):
                 with dpg.draw_layer(tag="track_layer"):
                     pass
                 with dpg.draw_layer(tag="driver_layer"):
                     pass
 
-    # Pre-populate race dropdown with default year
+    # Pre-populate race dropdown
     try:
         races = get_year_schedule(2023)
         dpg.configure_item("race_dropdown", items=races)
@@ -180,7 +195,6 @@ def run():
     dpg.show_viewport()
     dpg.set_primary_window("main_window", True)
 
-
     worker = threading.Thread(target=pos_worker, daemon=True)
     worker.start()
 
@@ -189,5 +203,3 @@ def run():
         dpg.render_dearpygui_frame()
 
     dpg.destroy_context()
-
-

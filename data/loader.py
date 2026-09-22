@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 from fastf1.core import Session
 import logging
+import os
+import pickle
+
 
 logging.getLogger("fastf1").setLevel(logging.ERROR)
 
@@ -192,3 +195,180 @@ def get_race_state_at_time(session: Session, current_time: float, race_start_tim
     except Exception as e:
         print(f"get_race_state_at_time error: {e}")
         return []
+
+
+def precompute_frames(session: Session) -> dict:
+    import pickle
+    import os
+
+    FPS = 25
+    DT = 1.0 / FPS
+
+    # Check cache first
+    event_name = str(session).replace(" ", "_").replace("/", "_")
+    cache_path = f"cache/computed/{event_name}_frames.pkl"
+
+    if os.path.exists(cache_path):
+        print(f"Loading precomputed frames from cache...")
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
+
+    drivers = session.drivers
+    driver_data = {}
+    global_t_min = None
+    global_t_max = None
+
+    print("Precomputing telemetry for all drivers...")
+
+    for driver in drivers:
+        try:
+            driver_laps = session.laps.pick_drivers(driver)
+            driver_info = session.get_driver(driver)
+            code = driver_info["Abbreviation"]
+
+            t_all = []
+            x_all = []
+            y_all = []
+            dist_all = []
+            lap_all = []
+            compound_all = []
+
+            cumulative_dist = 0.0
+
+            for _, lap in driver_laps.iterlaps():
+                telemetry = lap.get_telemetry()
+
+                if telemetry is None or telemetry.empty:
+                    continue
+
+                lap_number = int(lap["LapNumber"])
+                compound = lap["Compound"] if pd.notna(lap["Compound"]) else "?"
+
+                t_lap = telemetry["SessionTime"].dt.total_seconds().to_numpy()
+                x_lap = telemetry["X"].to_numpy()
+                y_lap = telemetry["Y"].to_numpy()
+                d_lap = telemetry["Distance"].to_numpy()
+
+                race_dist = cumulative_dist + d_lap
+
+                t_all.append(t_lap)
+                x_all.append(x_lap)
+                y_all.append(y_lap)
+                dist_all.append(race_dist)
+                lap_all.append(np.full_like(t_lap, lap_number, dtype=float))
+                compound_all.append(np.full(len(t_lap), compound))
+
+                lap_dist = telemetry["Distance"].max()
+                if pd.notna(lap_dist):
+                    cumulative_dist += lap_dist
+
+            if not t_all:
+                continue
+
+            t_arr = np.concatenate(t_all)
+            x_arr = np.concatenate(x_all)
+            y_arr = np.concatenate(y_all)
+            dist_arr = np.concatenate(dist_all)
+            lap_arr = np.concatenate(lap_all)
+            compound_arr = np.concatenate(compound_all)
+
+            order = np.argsort(t_arr)
+            t_arr = t_arr[order]
+            x_arr = x_arr[order]
+            y_arr = y_arr[order]
+            dist_arr = dist_arr[order]
+            lap_arr = lap_arr[order]
+            compound_arr = compound_arr[order]
+
+            t_min = t_arr.min()
+            t_max = t_arr.max()
+
+            global_t_min = t_min if global_t_min is None else min(global_t_min, t_min)
+            global_t_max = t_max if global_t_max is None else max(global_t_max, t_max)
+
+            driver_data[code] = {
+                "t": t_arr,
+                "x": x_arr,
+                "y": y_arr,
+                "dist": dist_arr,
+                "lap": lap_arr,
+                "compound": compound_arr,
+                "team": driver_info["TeamName"],
+            }
+
+            print(f"  {code}: {len(t_arr)} telemetry points")
+
+        except Exception as e:
+            print(f"Driver {driver} error: {e}")
+            continue
+
+    if global_t_min is None or global_t_max is None:
+        raise ValueError("No valid telemetry data found")
+
+    # Build common timeline at 25fps
+    timeline = np.arange(global_t_min, global_t_max, DT)
+    print(f"Building {len(timeline)} frames at {FPS}fps...")
+
+    # Resample each driver onto the common timeline
+    resampled = {}
+    for code, data in driver_data.items():
+        t = data["t"]
+        order = np.argsort(t)
+        t_s = t[order]
+
+        resampled[code] = {
+            "x":        np.interp(timeline, t_s, data["x"][order]),
+            "y":        np.interp(timeline, t_s, data["y"][order]),
+            "dist":     np.interp(timeline, t_s, data["dist"][order]),
+            "lap":      np.interp(timeline, t_s, data["lap"][order]),
+            "team":     data["team"],
+            "compound": data["compound"],
+            "t":        data["t"],
+        }
+
+    # Build frames
+    frames = []
+    codes = list(resampled.keys())
+
+    for i, t in enumerate(timeline):
+        snapshot = []
+        for code in codes:
+            d = resampled[code]
+            lap_idx = min(int(np.searchsorted(d["t"], t)), len(d["compound"]) - 1)
+            snapshot.append({
+                "driver": code,
+                "team":   d["team"],
+                "x":      float(d["x"][i]),
+                "y":      float(d["y"][i]),
+                "dist":   float(d["dist"][i]),
+                "lap":    int(round(d["lap"][i])),
+                "compound": str(d["compound"][lap_idx]),
+            })
+
+        # Sort by (lap, dist) descending
+        snapshot.sort(key=lambda r: (r["lap"], r["dist"]), reverse=True)
+
+        # Assign positions
+        for pos, car in enumerate(snapshot, start=1):
+            car["position"] = pos
+
+        frames.append({
+            "t": float(t),
+            "drivers": snapshot,
+        })
+
+    print(f"Done. {len(frames)} frames precomputed.")
+
+    # Save to cache
+    os.makedirs("cache/computed", exist_ok=True)
+    result = {
+        "frames": frames,
+        "t_min": float(global_t_min),  # type: ignore
+        "t_max": float(global_t_max),  # type: ignore
+        "fps": FPS,
+    }
+    with open(cache_path, "wb") as f:
+        pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Saved to cache: {cache_path}")
+
+    return result
